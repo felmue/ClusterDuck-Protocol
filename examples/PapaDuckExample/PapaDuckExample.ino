@@ -8,13 +8,12 @@
 #define SSID        ""
 #define PASSWORD    ""
 
-#define ORG         ""                  
+#define ORG         ""
 #define DEVICE_ID   ""
-#define DEVICE_TYPE "PAPA"                
-#define TOKEN       ""      
+#define DEVICE_TYPE ""
+#define TOKEN       ""
 
 char server[]           = ORG ".messaging.internetofthings.ibmcloud.com";
-char topic[]            = "iot-2/evt/status/fmt/json";
 char authMethod[]       = "use-token-auth";
 char token[]            = TOKEN;
 char clientId[]         = "d:" ORG ":" DEVICE_TYPE ":" DEVICE_ID;
@@ -27,6 +26,7 @@ WiFiClientSecure wifiClient;
 PubSubClient client(server, 8883, wifiClient);
 
 byte ping = 0xF4;
+bool retry = true;
 
 void setup() {
   // put your setup code here, to run once:
@@ -35,58 +35,50 @@ void setup() {
   duck.setDeviceId("Papa");
 
   duck.setupLoRa();
-  LoRa.receive();
   duck.setupDisplay("Papa");
 
-  setupWiFi();
-  
+  const char * ap = "PapaDuck Setup";
+  duck.setupWifiAp(ap);
+	duck.setupDns();
+
+	duck.setupInternet(SSID, PASSWORD);
+  duck.setupWebServer();
+
   Serial.println("PAPA Online");
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
-  if(WiFi.status() != WL_CONNECTED)
+  if(WiFi.status() != WL_CONNECTED && retry)
   {
     Serial.print("WiFi disconnected, reconnecting to local network: ");
-    Serial.print(SSID);
-    setupWiFi();
-
-  }
-  setupMQTT();
-
-  int packetSize = LoRa.parsePacket();
-  if (packetSize != 0) {
-    byte whoIsIt = LoRa.peek();
-    if(whoIsIt != ping) {
-      Serial.println(packetSize);
-      String * val = duck.getPacketData(packetSize);
-      quackJson();
+    Serial.print(duck.getSSID());
+    if(duck.ssidAvailable()) {
+      duck.setupInternet(duck.getSSID(), duck.getPassword());
+		  duck.setupDns();
+    } else {
+      retry = false;
+      timer.in(5000, enableRetry);
     }
+    
+  }
+  if(WiFi.status() == WL_CONNECTED) setupMQTT();
+
+  if(duck.getFlag()) {  //If LoRa packet received
+    duck.flipFlag();
+    duck.flipInterrupt();
+    int pSize = duck.handlePacket();
+    if(pSize > 3) {
+      duck.getPacketData(pSize);
+      quackJson();
+
+    }
+    duck.flipInterrupt();
+    duck.startReceive();
   }
 
-  
+
   timer.tick();
-}
-
-void setupWiFi()
-{
-  Serial.println();
-  Serial.print("Connecting to ");
-  Serial.print(SSID);
-
-  // Connect to Access Poink
-  WiFi.begin(SSID, PASSWORD);
-
-  while (WiFi.status() != WL_CONNECTED)
-  {
-    timer.tick(); //Advance timer to reboot after awhile
-    //delay(500);
-    Serial.print(".");
-  }
-
-  // Connected to Access Point
-  Serial.println("");
-  Serial.println("WiFi connected - PAPA ONLINE");
 }
 
 void setupMQTT()
@@ -103,29 +95,42 @@ void setupMQTT()
 }
 
 void quackJson() {
-  const int bufferSize = 4 * JSON_OBJECT_SIZE(1);
-  DynamicJsonBuffer jsonBuffer(bufferSize);
+  const int bufferSize = 4*  JSON_OBJECT_SIZE(4);
+  StaticJsonDocument<bufferSize> doc;
 
-  JsonObject& root = jsonBuffer.createObject();
+  JsonObject root = doc.as<JsonObject>();
 
   Packet lastPacket = duck.getLastPacket();
 
-  root["DeviceID"]        = lastPacket.senderId;
-  root["MessageID"]       = lastPacket.messageId;
-  root["Payload"]         = lastPacket.payload;
+  doc["DeviceID"]        = lastPacket.senderId;
+  doc["MessageID"]       = lastPacket.messageId;
+  doc["Payload"]     .set(lastPacket.payload);
+  doc["path"]         .set(lastPacket.path + "," + duck.getDeviceId());
 
-  root["path"]            = lastPacket.path + "," + duck.getDeviceId();
+  String loc = "iot-2/evt/"+ lastPacket.topic +"/fmt/json";
+  Serial.print(loc);
+  // add space for null char
+  int len = loc.length() + 1;
+
+  char topic[len];
+  loc.toCharArray(topic, len);
 
   String jsonstat;
-  root.printTo(jsonstat);
-  root.prettyPrintTo(Serial);
+  serializeJson(doc, jsonstat);
 
   if (client.publish(topic, jsonstat.c_str())) {
+
+    serializeJsonPretty(doc, Serial);
+     Serial.println("");
     Serial.println("Publish ok");
-    root.prettyPrintTo(Serial);
-    Serial.println("");
+
   }
   else {
     Serial.println("Publish failed");
   }
+
+}
+
+bool enableRetry(void *) {
+  retry = true;
 }
